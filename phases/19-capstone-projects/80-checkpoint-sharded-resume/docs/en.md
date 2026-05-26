@@ -79,7 +79,7 @@ Concurrent write to one file via `O_APPEND` works on POSIX for byte-aligned writ
 
 Run it:
 
-```
+```bash
 python3 code/main.py
 ```
 
@@ -130,5 +130,5 @@ Lesson 81 saves a sharded checkpoint of the end-to-end DDP+ZeRO run and reloads 
 - [DeepSpeed checkpointing](https://www.deepspeed.ai/tutorials/checkpointing/)
 - [PyTorch torch.distributed.checkpoint](https://pytorch.org/docs/stable/distributed.checkpoint.html)
 - [POSIX rename atomicity](https://pubs.opengroup.org/onlinepubs/9699919799/functions/rename.html)
-- Phase 19 Lesson 78 — the ZeRO state this checkpoint is shaped to save
-- Phase 19 Lesson 81 — the end-to-end demo round-trips the saved state
+- Phase 19 Lesson 78 - the ZeRO state this checkpoint is shaped to save
+- Phase 19 Lesson 81 - the end-to-end demo round-trips the saved state
