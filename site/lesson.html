@@ -49,10 +49,11 @@
       z-index: 50;
       padding: 24px 0;
       transition: transform 0.25s ease;
+      transform: translateX(-100%);
     }
 
     .lesson-sidebar-toggle {
-      display: none;
+      display: flex;
       position: fixed;
       top: 74px;
       left: 10px;
@@ -163,7 +164,7 @@
     .lesson-main {
       flex: 1;
       min-width: 0;
-      margin-left: 240px;
+      margin-left: 0;
       display: flex;
       justify-content: center;
       padding: 56px 32px 96px;
@@ -1553,7 +1554,7 @@
     @media (min-width: 1440px) {
       .lesson-article { max-width: 760px; }
       .lesson-sidebar { width: 280px; min-width: 280px; }
-      .lesson-main { margin-left: 280px; padding-right: 280px; }
+      .lesson-main { padding-right: 280px; }
       .toc-sidebar { width: 280px; }
     }
 
@@ -1863,7 +1864,7 @@
         });
 
         document.addEventListener('click', function (e) {
-          if (window.innerWidth <= 900 && sidebar.classList.contains('open')) {
+          if (sidebar.classList.contains('open')) {
             if (!sidebar.contains(e.target) && e.target !== toggle) {
               sidebar.classList.remove('open');
             }
@@ -2662,6 +2663,40 @@
         rerenderMermaidModal();
       }
 
+      /* ── Mermaid dark-node text fix ──────────────────────────────── */
+      function isDarkColor(color) {
+        if (!color || color === 'none' || color === 'transparent') return false;
+        var r, g, b;
+        var m = color.match(/^#([0-9a-f]{6})$/i);
+        if (m) {
+          r = parseInt(m[1].substr(0, 2), 16);
+          g = parseInt(m[1].substr(2, 2), 16);
+          b = parseInt(m[1].substr(4, 2), 16);
+        } else {
+          m = color.match(/^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/);
+          if (m) { r = +m[1]; g = +m[2]; b = +m[3]; }
+          else return false;
+        }
+        var lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        return lum < 140;
+      }
+
+      function fixMermaidTextColors(rootEl) {
+        var svgs = rootEl ? rootEl.querySelectorAll('svg') : document.querySelectorAll('.mermaid-render svg, .mermaid-modal-body svg');
+        svgs.forEach(function (svg) {
+          svg.querySelectorAll('.node, [class*="node"]').forEach(function (node) {
+            var shape = node.querySelector('rect, path, ellipse, polygon, circle');
+            if (!shape) return;
+            var fill = shape.getAttribute('fill') || shape.style.fill || '';
+            if (fill === 'none' || fill === 'transparent') return;
+            if (isDarkColor(fill)) {
+              node.querySelectorAll('text, tspan').forEach(function (t) { t.style.fill = '#e8e6dc'; });
+              node.querySelectorAll('foreignObject p, foreignObject span, foreignObject div').forEach(function (el) { el.style.color = '#e8e6dc'; });
+            }
+          });
+        });
+      }
+
       function rerenderMermaidBlocks() {
         if (!window._mermaidReady) return;
         var sources = document.querySelectorAll('pre.mermaid.mermaid-source');
@@ -2680,6 +2715,7 @@
           window._mermaidReady.render('mermaid-' + idx + '-svg', def).then(function (result) {
             if (target._mermaidRenderToken !== token) return;
             target.innerHTML = result.svg;
+            fixMermaidTextColors(target);
           }).catch(function () {
             if (target._mermaidRenderToken !== token) return;
             target.innerHTML = '<p style="color:var(--text-muted);font-style:italic;">Diagram could not be rendered.</p>';
@@ -2792,6 +2828,7 @@
         window._mermaidReady.render('mermaid-modal-svg', def).then(function (result) {
           if (center._mermaidRenderToken !== token) return;
           center.innerHTML = result.svg;
+          fixMermaidTextColors(center);
         }).catch(function () {
           if (center._mermaidRenderToken !== token) return;
           center.innerHTML = '<p style="color:var(--text-muted);font-style:italic;">Diagram could not be rendered.</p>';
