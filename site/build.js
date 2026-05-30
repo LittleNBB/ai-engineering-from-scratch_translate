@@ -17,7 +17,7 @@ const ROADMAP_PATH = path.join(REPO_ROOT, 'ROADMAP.md');
 const GLOSSARY_PATH = path.join(REPO_ROOT, 'glossary', 'terms.md');
 const OUTPUT_PATH = path.join(__dirname, 'data.js');
 
-const GITHUB_BASE = 'https://github.com/rohitg00/ai-engineering-from-scratch/tree/main/';
+const GITHUB_BASE = 'https://github.com/LittleNBB/ai-engineering-from-scratch/tree/main/';
 
 // ─── Parse ROADMAP.md for lesson statuses ────────────────────────────
 function parseRoadmap(content) {
@@ -222,41 +222,76 @@ function parseReadme(content, roadmapStatuses) {
   return phases;
 }
 
-// ─── Extract lesson summary + keywords from docs/en.md ───────────────
+// ─── Extract lesson docs from all language files (en.md, zh.md, etc.) ─
 /**
- * Single-pass read of a lesson's docs/en.md.
+ * Reads all .md files in a lesson's docs/ directory (en.md, zh.md, ja.md, etc.)
+ * and extracts summary, keywords, and full content for each language.
  *
- * Returns:
- *   summary  — first `> blockquote` line (the lesson's one-liner motto).
- *   keywords — all `### H3` heading texts joined by ' · '.
+ * Returns an object like:
+ *   {
+ *     en: { summary: "...", keywords: "...", content: "..." },
+ *     zh: { summary: "...", keywords: "...", content: "..." },
+ *     ja: { summary: "...", keywords: "...", content: "..." }
+ *   }
+ *
+ * - summary  — first `> blockquote` line (the lesson's one-liner motto).
+ * - keywords — all `### H3` heading texts joined by ' · '.
  *              H3 headings are the densest vocabulary in a lesson doc
  *              (e.g. "Scaled dot-product · Causal masking · KV cache"),
  *              so they extend search coverage without bloating data.js.
+ * - content  — full markdown content for client-side rendering.
  *
- * Both fields are empty strings when the file is absent or has no
- * matching content — expected for planned lessons with no docs yet.
+ * Returns an empty object when the docs/ directory is absent or has no
+ * readable files — expected for planned lessons with no docs yet.
+ *
+ * @param {string} relPath - Relative path to lesson directory
+ *   (e.g., "phases/01-math-foundations/01-linear-algebra-intuition")
+ * @returns {Object} Multi-language documentation keyed by language code
  */
-function extractLessonMeta(relPath) {
-  const docPath = path.join(REPO_ROOT, relPath, 'docs', 'en.md');
-  const result = { summary: '', keywords: '' };
-  try {
-    const lines = fs.readFileSync(docPath, 'utf8').split(/\r?\n/);
-    const h3s = [];
-    for (const raw of lines) {
-      const line = raw.trim();
-      if (!result.summary && line.startsWith('> ') && line.length > 3) {
-        const s = line.slice(2).trim();
-        result.summary = s.length > 180 ? s.slice(0, 177) + '…' : s;
-      }
-      if (line.startsWith('### ')) {
-        const heading = line.slice(4).trim();
-        if (heading) h3s.push(heading);
-      }
-    }
-    if (h3s.length) result.keywords = h3s.join(' · ');
-  } catch (_) {
-    // File absent or unreadable — expected for planned lessons.
+function extractLessonDocs(relPath) {
+  const docsDir = path.join(REPO_ROOT, relPath, 'docs');
+  const result = {};
+
+  // Check if docs directory exists
+  if (!fs.existsSync(docsDir)) {
+    return result;
   }
+
+  // Read all .md files in the docs directory
+  const docFiles = fs.readdirSync(docsDir).filter(f => f.endsWith('.md'));
+
+  for (const file of docFiles) {
+    const lang = file.replace(/\.md$/, ''); // e.g., "en", "zh", "ja"
+    const docPath = path.join(docsDir, file);
+
+    try {
+      const content = fs.readFileSync(docPath, 'utf8');
+      const lines = content.split(/\r?\n/);
+      const h3s = [];
+      let summary = '';
+
+      // Extract summary from first blockquote and keywords from H3 headings
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!summary && line.startsWith('> ') && line.length > 3) {
+          const s = line.slice(2).trim();
+          summary = s.length > 180 ? s.slice(0, 177) + '…' : s;
+        }
+        if (line.startsWith('### ')) {
+          const heading = line.slice(4).trim();
+          if (heading) h3s.push(heading);
+        }
+      }
+
+      result[lang] = {
+        summary: summary,
+        keywords: h3s.length ? h3s.join(' · ') : ''
+      };
+    } catch (_) {
+      // File absent or unreadable
+    }
+  }
+
   return result;
 }
 
@@ -409,15 +444,29 @@ function build() {
   console.log('🔍 Discovering outputs + Phase 14 missions...');
   const artifacts = discoverArtifacts();
 
-  console.log('📚 Extracting lesson summaries + keywords from docs/en.md...');
-  let summarized = 0, withKeywords = 0;
+  console.log('📚 Extracting lesson docs (en.md, zh.md, etc.)...');
+  let summarized = 0, withKeywords = 0, docsCount = {};
   for (const phase of phases) {
     for (const lesson of phase.lessons) {
       if (lesson.url) {
         const relPath = lesson.url.replace(GITHUB_BASE, '').replace(/\/+$/, '');
-        const meta = extractLessonMeta(relPath);
-        if (meta.summary)  { lesson.summary  = meta.summary;  summarized++;   }
-        if (meta.keywords) { lesson.keywords = meta.keywords; withKeywords++; }
+        const docs = extractLessonDocs(relPath);
+
+        // Store multi-language docs for client-side rendering
+        if (Object.keys(docs).length > 0) {
+          lesson.docs = docs;
+
+          // Count docs by language for stats
+          for (const lang of Object.keys(docs)) {
+            docsCount[lang] = (docsCount[lang] || 0) + 1;
+          }
+
+          // Use en.md for summary/keywords (backward compatibility)
+          if (docs.en) {
+            if (docs.en.summary)  { lesson.summary  = docs.en.summary;  summarized++;   }
+            if (docs.en.keywords) { lesson.keywords = docs.en.keywords; withKeywords++; }
+          }
+        }
       }
     }
   }
@@ -437,6 +486,7 @@ function build() {
   console.log(`   Summaries: ${summarized}, Keywords: ${withKeywords}`);
   console.log(`   Glossary terms: ${glossaryTerms.length}`);
   console.log(`   Artifacts: ${artifacts.length}`);
+  console.log(`   Docs by language: ${JSON.stringify(docsCount)}`);
 
   // Generate data.js
   const output = `// Auto-generated by build.js — do not edit manually.

@@ -595,6 +595,49 @@
       background: var(--blueprint-tint);
     }
 
+    /* ── Language Switcher ─────────────────────────────────────────── */
+    .lang-switcher {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 0 0 28px;
+      padding: 14px 0;
+      border-bottom: 1px solid var(--rule-soft);
+    }
+
+    .lang-switcher-label {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ink-mute);
+      margin-right: 4px;
+    }
+
+    .lang-btn {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 3px 10px;
+      border: 1px solid var(--rule-soft);
+      color: var(--ink-soft);
+      background: transparent;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+    }
+
+    .lang-btn:hover {
+      border-color: var(--blueprint);
+      color: var(--blueprint);
+    }
+
+    .lang-btn.active {
+      border-color: var(--blueprint);
+      color: var(--blueprint);
+      background: var(--blueprint-tint);
+    }
+
     .quiz-section,
     .quiz-container {
       border: 1px solid var(--blueprint);
@@ -1731,6 +1774,11 @@
         }
       }
 
+      // ── Multi-language state ──────────────────────────────────────
+      var GITHUB_BASE = 'https://github.com/LittleNBB/ai-engineering-from-scratch/tree/main/';
+      var currentLang = params.get('lang') || localStorage.getItem('lessonLang') || 'en';
+      var currentLessonDocs = null; // will be populated from PHASES data
+
       buildSidebar();
       initSidebarToggle();
       initScrollProgress();
@@ -1835,35 +1883,172 @@
       }
 
       function fetchLesson(path) {
-        var rawUrl = 'https://raw.githubusercontent.com/rohitg00/ai-engineering-from-scratch/main/' + path + '/docs/en.md';
-        var quizUrl = 'https://raw.githubusercontent.com/rohitg00/ai-engineering-from-scratch/main/' + path + '/quiz.json';
+        // ── Check available languages from PHASES data ──────────────
+        var lessonLangs = findLessonLangs(path);
+        currentLessonDocs = lessonLangs; // store for language switcher
+
+        // Determine which language to show
+        var lang = currentLang;
+        if (lessonLangs && !lessonLangs[lang]) lang = 'en'; // fallback to English
+        if (lessonLangs && !lessonLangs[lang]) lang = Object.keys(lessonLangs)[0]; // fallback to first available
+        currentLang = lang;
+
+        // Fetch the lesson content from GitHub
+        var rawUrl = 'https://raw.githubusercontent.com/LittleNBB/ai-engineering-from-scratch/main/' + path + '/docs/' + lang + '.md';
 
         fetch(rawUrl)
           .then(function (res) {
-            if (!res.ok) throw new Error('fetch-failed');
+            if (!res.ok) {
+              // If requested language not found, fallback to English
+              if (lang !== 'en') {
+                currentLang = 'en';
+                return fetch('https://raw.githubusercontent.com/LittleNBB/ai-engineering-from-scratch/main/' + path + '/docs/en.md')
+                  .then(function (r2) {
+                    if (!r2.ok) throw new Error('fetch-failed');
+                    return r2.text();
+                  });
+              }
+              throw new Error('fetch-failed');
+            }
             return res.text();
           })
           .then(function (md) {
             try {
               renderLesson(md);
+              if (lessonLangs && Object.keys(lessonLangs).length > 1) {
+                renderLangSwitcher(lessonLangs);
+              }
             } catch (err) {
               console.error('renderLesson failed', err);
               showError('Render error', 'Loaded the lesson markdown but failed to render it. Details in the browser console.');
               return;
             }
-            fetch(quizUrl)
-              .then(function (res) { return res.ok ? res.json() : null; })
-              .catch(function () { return null; })
-              .then(function (data) {
-                if (!data) return;
-                try { renderQuiz(data); }
-                catch (err) { console.error('renderQuiz failed', err); }
-              });
+            loadQuiz(path);
           })
           .catch(function () {
             showError('Lesson not found', 'Could not fetch the lesson at <code>' + escapeHtml(path) + '</code>. It may not have been written yet.');
           });
       }
+
+      /**
+       * Find available languages for a lesson by matching the path against PHASES data.
+       * @param {string} path - Lesson path like "phases/11-llm-engineering/01-prompt-engineering"
+       * @returns {Object|null} The docs metadata object { en: {summary, keywords}, zh: {summary, keywords} } or null
+       */
+      function findLessonLangs(path) {
+        if (typeof PHASES === 'undefined' || !path) return null;
+        for (var i = 0; i < PHASES.length; i++) {
+          for (var j = 0; j < PHASES[i].lessons.length; j++) {
+            var lesson = PHASES[i].lessons[j];
+            if (!lesson.url) continue;
+            var relPath = lesson.url.replace(GITHUB_BASE, '').replace(/\/+$/, '');
+            if (relPath === path) {
+              return lesson.docs || null;
+            }
+          }
+        }
+        return null;
+      }
+
+      /** Fetch and render the quiz for a lesson. */
+      function loadQuiz(path) {
+        var quizUrl = 'https://raw.githubusercontent.com/LittleNBB/ai-engineering-from-scratch/main/' + path + '/quiz.json';
+        fetch(quizUrl)
+          .then(function (res) { return res.ok ? res.json() : null; })
+          .catch(function () { return null; })
+          .then(function (data) {
+            if (!data) return;
+            try { renderQuiz(data); }
+            catch (err) { console.error('renderQuiz failed', err); }
+          });
+      }
+
+      /**
+       * Render the language switcher buttons below the lesson title.
+       * @param {Object} docs - Multi-language docs metadata object { en: {summary}, zh: {summary} }
+       */
+      function renderLangSwitcher(docs) {
+        var availableLangs = Object.keys(docs);
+        if (availableLangs.length <= 1) return; // No switcher needed for single language
+
+        var langLabels = { en: 'English', zh: '中文', ja: '日本語', ko: '한국語', es: 'Español', fr: 'Français', de: 'Deutsch' };
+        var html = '<div class="lang-switcher">';
+        html += '<span class="lang-switcher-label">Language:</span>';
+        for (var i = 0; i < availableLangs.length; i++) {
+          var lang = availableLangs[i];
+          var label = langLabels[lang] || lang.toUpperCase();
+          var activeClass = lang === currentLang ? ' active' : '';
+          html += '<button class="lang-btn' + activeClass + '" data-lang="' + lang + '" onclick="switchLessonLang(\'' + lang + '\')">' + escapeHtml(label) + '</button>';
+        }
+        html += '</div>';
+
+        // Insert after the h1 title
+        var article = document.querySelector('.lesson-article');
+        if (article) {
+          var h1 = article.querySelector('h1');
+          if (h1) {
+            h1.insertAdjacentHTML('afterend', html);
+          }
+        }
+      }
+
+      /**
+       * Switch the displayed language for the current lesson.
+       * Fetches the new language content from GitHub and re-renders.
+       * @param {string} lang - Language code to switch to (e.g., "zh", "en")
+       */
+      window.switchLessonLang = function (lang) {
+        if (lang === currentLang) return; // Already showing this language
+
+        currentLang = lang;
+        localStorage.setItem('lessonLang', lang);
+
+        // Update URL param without reload
+        var url = new URL(window.location);
+        url.searchParams.set('lang', lang);
+        window.history.replaceState({}, '', url);
+
+        // Update active button state immediately
+        var langBtns = document.querySelectorAll('.lang-btn');
+        for (var i = 0; i < langBtns.length; i++) {
+          if (langBtns[i].getAttribute('data-lang') === lang) {
+            langBtns[i].classList.add('active');
+          } else {
+            langBtns[i].classList.remove('active');
+          }
+        }
+
+        // Fetch the new language content from GitHub
+        var rawUrl = 'https://raw.githubusercontent.com/LittleNBB/ai-engineering-from-scratch/main/' + lessonPath + '/docs/' + lang + '.md';
+
+        fetch(rawUrl)
+          .then(function (res) {
+            if (!res.ok) {
+              // Language file not found, revert to English
+              currentLang = 'en';
+              return fetch('https://raw.githubusercontent.com/LittleNBB/ai-engineering-from-scratch/main/' + lessonPath + '/docs/en.md')
+                .then(function (r2) {
+                  if (!r2.ok) throw new Error('fetch-failed');
+                  return r2.text();
+                });
+            }
+            return res.text();
+          })
+          .then(function (md) {
+            try {
+              renderLesson(md);
+              // Re-render the language switcher with the known docs
+              if (currentLessonDocs) {
+                renderLangSwitcher(currentLessonDocs);
+              }
+            } catch (err) {
+              console.error('renderLesson failed on language switch', err);
+            }
+          })
+          .catch(function (err) {
+            console.error('Failed to fetch language:', lang, err);
+          });
+      };
 
       function showError(title, msg) {
         var el = document.getElementById('lessonContent');
@@ -2841,7 +3026,7 @@
           cb(null, ghApiCache[apiPath]);
           return;
         }
-        fetch('https://api.github.com/repos/rohitg00/ai-engineering-from-scratch/contents/' + apiPath, {
+        fetch('https://api.github.com/repos/LittleNBB/ai-engineering-from-scratch/contents/' + apiPath, {
           headers: { 'Accept': 'application/vnd.github.v3+json' }
         }).then(function (res) {
           if (!res.ok) throw new Error(res.status);
@@ -2899,7 +3084,7 @@
         ghApiFetch(lessonPath + '/outputs', function (err, data) {
           var el = document.getElementById('outputsContent');
           if (err || !data || !Array.isArray(data) || data.length === 0) {
-            el.innerHTML = '<div class="panel-fallback"><a href="https://github.com/rohitg00/ai-engineering-from-scratch/tree/main/' + lessonPath + '" target="_blank" rel="noopener">View lesson on GitHub</a></div>';
+            el.innerHTML = '<div class="panel-fallback"><a href="https://github.com/LittleNBB/ai-engineering-from-scratch/tree/main/' + lessonPath + '" target="_blank" rel="noopener">View lesson on GitHub</a></div>';
             return;
           }
 
@@ -2957,7 +3142,7 @@
         ghApiFetch(lessonPath + '/code', function (err, data) {
           var el = document.getElementById('codeContent');
           if (err || !data || !Array.isArray(data) || data.length === 0) {
-            el.innerHTML = '<div class="panel-fallback"><a href="https://github.com/rohitg00/ai-engineering-from-scratch/tree/main/' + lessonPath + '" target="_blank" rel="noopener">View lesson on GitHub</a></div>';
+            el.innerHTML = '<div class="panel-fallback"><a href="https://github.com/LittleNBB/ai-engineering-from-scratch/tree/main/' + lessonPath + '" target="_blank" rel="noopener">View lesson on GitHub</a></div>';
             return;
           }
 
