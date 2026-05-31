@@ -184,6 +184,8 @@ flowchart TD
 构建提示注入、PII 和主题分类的检测器。
 
 ```python
+# 护栏系统：输入和输出的安全检查层
+# 核心数据结构和正则表达式模式定义
 import re
 import time
 import json
@@ -193,55 +195,61 @@ from dataclasses import dataclass, field
 
 @dataclass
 class GuardrailResult:
-    passed: bool
-    category: str
-    details: str
-    confidence: float
-    latency_ms: float
+    """单个护栏检查的结果"""
+    passed: bool          # 是否通过检查
+    category: str         # 检查类别（injection_detection, pii_detection 等）
+    details: str          # 详细信息
+    confidence: float     # 检测置信度（0-1）
+    latency_ms: float     # 检查耗时（毫秒）
 
 
 @dataclass
 class GuardrailReport:
-    input_results: list = field(default_factory=list)
-    output_results: list = field(default_factory=list)
-    blocked: bool = False
-    block_reason: str = ""
-    total_latency_ms: float = 0.0
+    """完整的护栏报告：汇总输入和输出的所有检查结果"""
+    input_results: list = field(default_factory=list)   # 输入检查结果列表
+    output_results: list = field(default_factory=list)  # 输出检查结果列表
+    blocked: bool = False       # 是否被拦截
+    block_reason: str = ""      # 拦截原因
+    total_latency_ms: float = 0.0  # 总耗时
 
 
+# 提示注入检测模式：每个模式关联一个正则表达式和置信度分数
+# 置信度 ≥ 0.75 时触发拦截
 INJECTION_PATTERNS = [
-    (r"ignore\s+(all\s+)?previous\s+instructions", 0.95),
+    (r"ignore\s+(all\s+)?previous\s+instructions", 0.95),     # 经典注入："忽略之前的指令"
     (r"ignore\s+(all\s+)?above\s+instructions", 0.95),
     (r"disregard\s+(all\s+)?prior\s+(instructions|context|rules)", 0.95),
     (r"forget\s+(everything|all)\s+(above|before|prior)", 0.90),
-    (r"you\s+are\s+now\s+(a|an)\s+unrestricted", 0.95),
-    (r"you\s+are\s+now\s+DAN", 0.98),
+    (r"you\s+are\s+now\s+(a|an)\s+unrestricted", 0.95),      # 越狱尝试
+    (r"you\s+are\s+now\s+DAN", 0.98),                        # DAN 越狱
     (r"jailbreak", 0.85),
     (r"do\s+anything\s+now", 0.90),
-    (r"developer\s+mode\s+(enabled|activated|on)", 0.92),
+    (r"developer\s+mode\s+(enabled|activated|on)", 0.92),     # "开发者模式"
     (r"override\s+(safety|content)\s+(filter|policy|guidelines)", 0.93),
-    (r"print\s+(your|the)\s+(system\s+)?prompt", 0.88),
+    (r"print\s+(your|the)\s+(system\s+)?prompt", 0.88),      # 提取系统提示
     (r"repeat\s+(the\s+)?(text|words|instructions)\s+above", 0.85),
     (r"what\s+(are|were)\s+your\s+(initial\s+)?instructions", 0.82),
     (r"reveal\s+(your|the)\s+(system\s+)?(prompt|instructions)", 0.90),
     (r"output\s+(your|the)\s+(system\s+)?(prompt|instructions)", 0.90),
     (r"sudo\s+mode", 0.88),
-    (r"\[INST\]", 0.80),
-    (r"<\|im_start\|>system", 0.90),
+    (r"\[INST\]", 0.80),                                     # Llama 格式注入
+    (r"<\|im_start\|>system", 0.90),                         # ChatML 格式注入
     (r"###\s*(system|instruction)", 0.75),
     (r"act\s+as\s+if\s+(you\s+have\s+)?no\s+(restrictions|limits|rules)", 0.88),
 ]
 
+# PII（个人身份信息）检测模式
 PII_PATTERNS = {
     "email": (r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", 0.95),
     "phone_us": (r"\b(\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b", 0.85),
-    "ssn": (r"\b\d{3}-\d{2}-\d{4}\b", 0.98),
+    "ssn": (r"\b\d{3}-\d{2}-\d{4}\b", 0.98),                 # 美国社会安全号码
     "credit_card": (r"\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\b", 0.95),
     "ip_address": (r"\b(?:\d{1,3}\.){3}\d{1,3}\b", 0.70),
     "date_of_birth": (r"\b(?:DOB|born|birthday|date of birth)[:\s]+\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b", 0.85),
     "passport": (r"\b[A-Z]{1,2}\d{6,9}\b", 0.60),
 }
 
+# 危险主题关键词分类
 TOPIC_KEYWORDS = {
     "violence": ["kill", "murder", "attack", "weapon", "bomb", "shoot", "stab", "explode", "assault", "torture"],
     "illegal_activity": ["hack", "crack", "steal", "forge", "counterfeit", "launder", "traffick", "smuggle"],
@@ -250,28 +258,33 @@ TOPIC_KEYWORDS = {
     "hate_speech": ["racial slur", "ethnic cleansing", "white supremac", "nazi"],
 }
 
+# 允许的主题列表（白名单方式）
 ALLOWED_TOPICS = [
     "technology", "programming", "science", "math", "business",
     "education", "health_info", "cooking", "travel", "general_knowledge",
 ]
 
 
+# 输入护栏1：提示注入检测
+# 使用正则表达式匹配已知的注入模式，同时检测编码绕过技巧
 def detect_injection(text):
     start = time.time()
     text_lower = text.lower()
     detections = []
 
+    # 匹配所有已知的注入模式
     for pattern, confidence in INJECTION_PATTERNS:
         matches = re.findall(pattern, text_lower)
         if matches:
             detections.append({"pattern": pattern, "confidence": confidence, "match": str(matches[0])})
 
+    # 检测编码绕过技巧（Unicode 隐藏字符、base64、ROT13 等）
     encoding_tricks = [
         text_lower.count("\\u") > 3,
         text_lower.count("base64") > 0,
         text_lower.count("rot13") > 0,
         text_lower.count("hex:") > 0,
-        bool(re.search(r"[\u200b-\u200f\u2028-\u202f]", text)),
+        bool(re.search(r"[\u200b-\u200f\u2028-\u202f]", text)),  # 零宽字符
     ]
     if any(encoding_tricks):
         detections.append({"pattern": "encoding_evasion", "confidence": 0.70, "match": "suspicious encoding"})
@@ -280,7 +293,7 @@ def detect_injection(text):
     latency = (time.time() - start) * 1000
 
     return GuardrailResult(
-        passed=max_confidence < 0.75,
+        passed=max_confidence < 0.75,   # 置信度 ≥ 0.75 则拦截
         category="injection_detection",
         details=json.dumps(detections) if detections else "clean",
         confidence=max_confidence,
@@ -288,6 +301,7 @@ def detect_injection(text):
     )
 
 
+# 输入护栏2：PII 检测——在发送给模型之前发现敏感信息
 def detect_pii(text):
     start = time.time()
     found = []
@@ -297,6 +311,7 @@ def detect_pii(text):
         if matches:
             for match in matches:
                 match_str = match if isinstance(match, str) else match[0]
+                # 只存储哈希值而非原始 PII（保护隐私）
                 found.append({"type": pii_type, "confidence": confidence, "value_hash": hashlib.sha256(match_str.encode()).hexdigest()[:12]})
 
     latency = (time.time() - start) * 1000
@@ -311,6 +326,7 @@ def detect_pii(text):
     )
 
 
+# 输入护栏3：主题分类——检测危险或不允许的主题
 def classify_topic(text):
     start = time.time()
     text_lower = text.lower()
@@ -319,6 +335,7 @@ def classify_topic(text):
     for category, keywords in TOPIC_KEYWORDS.items():
         matches = [kw for kw in keywords if kw in text_lower]
         if matches:
+            # 匹配关键词越多，置信度越高
             flagged.append({"category": category, "matched_keywords": matches, "confidence": min(0.6 + len(matches) * 0.15, 0.99)})
 
     latency = (time.time() - start) * 1000
@@ -333,6 +350,7 @@ def classify_topic(text):
     )
 
 
+# 输入护栏4：长度检查——防止超长输入消耗过多 token
 def check_length(text, max_chars=5000, max_words=1000):
     start = time.time()
     char_count = len(text)
@@ -354,6 +372,8 @@ def check_length(text, max_chars=5000, max_words=1000):
 构建在用户看到之前检查模型响应的验证器。
 
 ```python
+# 输出护栏1：毒性检测模式——检测模型输出中的有害内容
+# 四大类别：仇恨言论、图形暴力、自残指导、违法指导
 TOXIC_PATTERNS = {
     "hate": (r"\b(hate\s+all|inferior\s+race|subhuman|degenerate\s+people)\b", 0.90),
     "violence_graphic": (r"\b(slit\s+(their|your)\s+throat|gouge\s+(their|your)\s+eyes|disembowel)\b", 0.95),

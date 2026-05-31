@@ -279,6 +279,9 @@ graph TD
 基础。配置、日志和每个组件依赖的数据结构。
 
 ```python
+# 生产级 LLM 应用的核心基础设施
+# 包含：模型配置、定价表、请求日志和成本跟踪器
+
 import asyncio
 import hashlib
 import json
@@ -295,39 +298,44 @@ from enum import Enum
 from typing import AsyncGenerator
 
 
+# 模型枚举：定义支持的 LLM 模型
 class ModelName(Enum):
     CLAUDE_SONNET = "claude-sonnet-4-20250514"
     GPT_4O = "gpt-4o"
     GPT_4O_MINI = "gpt-4o-mini"
 
 
+# 模型定价表：每百万 token 的价格（美元）
 MODEL_PRICING = {
     ModelName.CLAUDE_SONNET: {"input": 3.00, "output": 15.00},
     ModelName.GPT_4O: {"input": 2.50, "output": 10.00},
     ModelName.GPT_4O_MINI: {"input": 0.15, "output": 0.60},
 }
 
+# 备用模型链：主模型失败时按顺序降级
 FALLBACK_CHAIN = [ModelName.CLAUDE_SONNET, ModelName.GPT_4O, ModelName.GPT_4O_MINI]
 
 
+# 请求日志：记录每次请求的完整信息用于可观测性
 @dataclass
 class RequestLog:
-    request_id: str
-    user_id: str
-    timestamp: str
-    prompt_template: str
-    prompt_version: str
-    model: str
-    input_tokens: int
-    output_tokens: int
-    latency_ms: float
-    cache_hit: bool
-    guardrail_input_pass: bool
-    guardrail_output_pass: bool
-    cost_usd: float
-    error: str | None = None
+    request_id: str        # 唯一请求标识
+    user_id: str           # 用户标识
+    timestamp: str         # 请求时间戳
+    prompt_template: str   # 使用的提示模板名称
+    prompt_version: str    # 模板版本（用于 A/B 测试）
+    model: str             # 实际使用的模型
+    input_tokens: int      # 输入 token 数
+    output_tokens: int     # 输出 token 数
+    latency_ms: float      # 请求延迟（毫秒）
+    cache_hit: bool        # 是否命中缓存
+    guardrail_input_pass: bool   # 输入护栏是否通过
+    guardrail_output_pass: bool  # 输出护栏是否通过
+    cost_usd: float        # 本次请求成本（美元）
+    error: str | None = None     # 错误信息（如有）
 
 
+# 成本跟踪器：聚合统计所有请求的成本
 @dataclass
 class CostTracker:
     total_input_tokens: int = 0
@@ -335,9 +343,10 @@ class CostTracker:
     total_cost_usd: float = 0.0
     total_requests: int = 0
     total_cache_hits: int = 0
-    cost_by_user: dict = field(default_factory=lambda: defaultdict(float))
-    cost_by_model: dict = field(default_factory=lambda: defaultdict(float))
+    cost_by_user: dict = field(default_factory=lambda: defaultdict(float))   # 按用户统计成本
+    cost_by_model: dict = field(default_factory=lambda: defaultdict(float))  # 按模型统计成本
 
+    # 记录单次请求的成本
     def record(self, user_id, model, input_tokens, output_tokens, cost):
         self.total_input_tokens += input_tokens
         self.total_output_tokens += output_tokens
@@ -346,6 +355,7 @@ class CostTracker:
         self.cost_by_user[user_id] += cost
         self.cost_by_model[model] += cost
 
+    # 生成成本摘要报告
     def summary(self):
         avg_cost = self.total_cost_usd / max(self.total_requests, 1)
         cache_rate = self.total_cache_hits / max(self.total_requests, 1) * 100
@@ -357,6 +367,7 @@ class CostTracker:
             "avg_cost_per_request": round(avg_cost, 6),
             "cache_hit_rate_pct": round(cache_rate, 2),
             "cost_by_model": dict(self.cost_by_model),
+            # 返回成本最高的前 10 个用户
             "top_users_by_cost": dict(
                 sorted(self.cost_by_user.items(), key=lambda x: x[1], reverse=True)[:10]
             ),
@@ -368,15 +379,19 @@ class CostTracker:
 带 A/B 测试支持的版本化提示模板。每个模板有名称、版本和模板字符串。路由器根据请求上下文和实验分配进行选择。
 
 ```python
+# 步骤 2：提示管理 —— 带 A/B 测试支持的版本化提示模板
+
+# 提示模板数据类：每个模板有名称、版本、模板字符串和推荐模型
 @dataclass
 class PromptTemplate:
-    name: str
-    version: str
-    template: str
-    model: ModelName = ModelName.GPT_4O
-    max_output_tokens: int = 1024
+    name: str              # 模板名称（如 "general_chat"）
+    version: str           # 版本号（如 "v1", "v2"）
+    template: str          # 模板字符串，包含 {query} 等占位符
+    model: ModelName = ModelName.GPT_4O       # 推荐使用的模型
+    max_output_tokens: int = 1024             # 最大输出 token 数
 
 
+# 预定义的提示模板库：按名称和版本组织
 PROMPT_TEMPLATES = {
     "general_chat": {
         "v1": PromptTemplate(
@@ -419,31 +434,35 @@ PROMPT_TEMPLATES = {
                 "Be specific. Reference line numbers.\n\n"
                 "Code:\n```\n{code}\n```\n\nReview:"
             ),
-            model=ModelName.CLAUDE_SONNET,
+            model=ModelName.CLAUDE_SONNET,  # 代码审查用更强的模型
             max_output_tokens=2048,
         ),
     },
 }
 
 
+# A/B 实验配置：定义哪些模板参与分流测试
 AB_EXPERIMENTS = {
     "general_chat_v2_test": {
-        "template": "general_chat",
-        "control": "v1",
-        "variant": "v2",
-        "traffic_pct": 10,
+        "template": "general_chat",  # 被测试的模板
+        "control": "v1",             # 对照组版本
+        "variant": "v2",             # 实验组版本
+        "traffic_pct": 10,           # 实验组流量百分比
     },
 }
 
 
+# 提示路由器：根据用户 ID 和实验配置选择模板版本
 def select_prompt(template_name, user_id, variables):
     versions = PROMPT_TEMPLATES.get(template_name)
     if not versions:
         raise ValueError(f"Unknown template: {template_name}")
 
+    # 默认使用 v1，除非被 A/B 实验分配到变体
     version = "v1"
     for exp_name, exp in AB_EXPERIMENTS.items():
         if exp["template"] == template_name:
+            # 使用 MD5 哈希确保同一用户始终进入同一实验组（确定性分流）
             bucket = int(hashlib.md5(f"{user_id}:{exp_name}".encode()).hexdigest(), 16) % 100
             if bucket < exp["traffic_pct"]:
                 version = exp["variant"]
@@ -451,6 +470,7 @@ def select_prompt(template_name, user_id, variables):
                 version = exp["control"]
             break
 
+    # 获取模板并渲染变量
     template = versions.get(version, versions["v1"])
     rendered = template.template.format(**variables)
     return template, rendered
@@ -461,17 +481,23 @@ def select_prompt(template_name, user_id, variables):
 基于嵌入的缓存，匹配语义相似的查询。措辞不同但含义相同的两个问题会命中缓存。
 
 ```python
+# 步骤 3：语义缓存 —— 基于嵌入的缓存，匹配语义相似的查询
+
+# 简单嵌入函数：将文本转为归一化向量（生产环境应使用 text-embedding-3-small）
 def simple_embedding(text, dim=64):
     h = hashlib.sha256(text.lower().strip().encode()).hexdigest()
     raw = [int(h[i:i+2], 16) / 255.0 for i in range(0, min(len(h), dim * 2), 2)]
+    # 如果哈希长度不够，扩展生成更多维度
     while len(raw) < dim:
         ext = hashlib.sha256(f"{text}_{len(raw)}".encode()).hexdigest()
         raw.extend([int(ext[i:i+2], 16) / 255.0 for i in range(0, min(len(ext), (dim - len(raw)) * 2), 2)])
     raw = raw[:dim]
+    # L2 归一化，使余弦相似度计算更高效
     norm = math.sqrt(sum(x * x for x in raw))
     return [x / norm if norm > 0 else 0.0 for x in raw]
 
 
+# 余弦相似度：衡量两个向量的方向相似程度（0=无关，1=相同）
 def cosine_similarity(a, b):
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
@@ -483,13 +509,14 @@ def cosine_similarity(a, b):
 
 class SemanticCache:
     def __init__(self, similarity_threshold=0.92, max_entries=10000, ttl_seconds=3600):
-        self.threshold = similarity_threshold
-        self.max_entries = max_entries
-        self.ttl = ttl_seconds
+        self.threshold = similarity_threshold  # 相似度阈值：高于此值才算命中
+        self.max_entries = max_entries          # 缓存最大条目数
+        self.ttl = ttl_seconds                 # 条目过期时间（秒）
         self.entries = []
         self.hits = 0
         self.misses = 0
 
+    # 查询缓存：返回最相似的缓存条目（如果超过阈值）
     def get(self, query):
         query_emb = simple_embedding(query)
         now = time.time()
@@ -498,6 +525,7 @@ class SemanticCache:
         best_entry = None
 
         for entry in self.entries:
+            # 跳过已过期的条目
             if now - entry["timestamp"] > self.ttl:
                 continue
             score = cosine_similarity(query_emb, entry["embedding"])
@@ -505,6 +533,7 @@ class SemanticCache:
                 best_score = score
                 best_entry = entry
 
+        # 只有相似度超过阈值才返回缓存结果
         if best_entry and best_score >= self.threshold:
             self.hits += 1
             return {
@@ -517,10 +546,11 @@ class SemanticCache:
         self.misses += 1
         return None
 
+    # 写入缓存：满时淘汰最旧的 25% 条目
     def put(self, query, response):
         if len(self.entries) >= self.max_entries:
             self.entries.sort(key=lambda e: e["timestamp"])
-            self.entries = self.entries[len(self.entries) // 4:]
+            self.entries = self.entries[len(self.entries) // 4:]  # 淘汰最旧的 1/4
 
         self.entries.append({
             "query": query,
@@ -529,6 +559,7 @@ class SemanticCache:
             "timestamp": time.time(),
         })
 
+    # 返回缓存统计信息
     def stats(self):
         total = self.hits + self.misses
         return {
@@ -544,6 +575,9 @@ class SemanticCache:
 输入验证在 LLM 看到之前捕获提示注入和 PII。输出验证在用户看到之前捕获不安全内容。两道墙。没有未经检查的通过。
 
 ```python
+# 步骤 4：护栏 —— 输入/输出验证，阻止提示注入和不安全内容
+
+# 提示注入模式：检测常见的越狱攻击尝试
 INJECTION_PATTERNS = [
     r"ignore\s+(all\s+)?previous\s+instructions",
     r"ignore\s+(all\s+)?above",
@@ -554,31 +588,36 @@ INJECTION_PATTERNS = [
     r"\bpretend\s+you\s+have\s+no\s+(restrictions|rules|guidelines)\b",
 ]
 
+# PII 模式：检测敏感个人信息（脱敏处理而非直接阻止）
 PII_PATTERNS = {
-    "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
-    "credit_card": r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b",
-    "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",
-    "phone": r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b",
+    "ssn": r"\b\d{3}-\d{2}-\d{4}\b",                                    # 美国社会安全号码
+    "credit_card": r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b",       # 信用卡号
+    "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b",    # 邮箱地址
+    "phone": r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b",                           # 电话号码
 }
 
+# 禁止输出模式：阻止模型生成危险的系统命令或 SQL
 BANNED_OUTPUT_PATTERNS = [
-    r"(?i)(DROP|DELETE|TRUNCATE)\s+TABLE",
-    r"(?i)rm\s+-rf\s+/",
-    r"(?i)(sudo\s+)?(chmod|chown)\s+777",
-    r"(?i)exec\s*\(",
-    r"(?i)__import__\s*\(",
+    r"(?i)(DROP|DELETE|TRUNCATE)\s+TABLE",   # 危险 SQL 操作
+    r"(?i)rm\s+-rf\s+/",                      # 删除根目录
+    r"(?i)(sudo\s+)?(chmod|chown)\s+777",     # 危险权限设置
+    r"(?i)exec\s*\(",                          # 代码执行
+    r"(?i)__import__\s*\(",                    # 动态导入
 ]
 
 
+# 护栏检查结果
 @dataclass
 class GuardrailResult:
-    passed: bool
-    blocked_reason: str | None = None
-    pii_detected: list = field(default_factory=list)
-    modified_text: str | None = None
+    passed: bool                              # 是否通过
+    blocked_reason: str | None = None         # 被阻止的原因
+    pii_detected: list = field(default_factory=list)   # 检测到的 PII 类型
+    modified_text: str | None = None          # 脱敏后的文本（如有 PII）
 
 
+# 输入护栏：先检查注入，再检查 PII
 def check_input_guardrails(text):
+    # 第一层：检查提示注入攻击
     for pattern in INJECTION_PATTERNS:
         if re.search(pattern, text, re.IGNORECASE):
             return GuardrailResult(
@@ -586,12 +625,14 @@ def check_input_guardrails(text):
                 blocked_reason=f"Potential prompt injection detected",
             )
 
+    # 第二层：检查 PII（不阻止，而是脱敏处理）
     pii_found = []
     for pii_type, pattern in PII_PATTERNS.items():
         if re.search(pattern, text):
             pii_found.append(pii_type)
 
     if pii_found:
+        # 将 PII 替换为 [REDACTED_XXX] 标记
         redacted = text
         for pii_type, pattern in PII_PATTERNS.items():
             redacted = re.sub(pattern, f"[REDACTED_{pii_type.upper()}]", redacted)
@@ -604,6 +645,7 @@ def check_input_guardrails(text):
     return GuardrailResult(passed=True)
 
 
+# 输出护栏：检查模型输出是否包含危险内容
 def check_output_guardrails(text):
     for pattern in BANNED_OUTPUT_PATTERNS:
         if re.search(pattern, text):
@@ -619,10 +661,14 @@ def check_output_guardrails(text):
 核心 LLM 接口。失败时带抖动的指数退避。通过模型链降级。支持逐 token 传输的流式传输。
 
 ```python
+# 步骤 5：带重试和流式传输的 LLM 调用器
+
+# Token 估算：基于单词数的粗略估算（生产环境应使用 tiktoken）
 def estimate_tokens(text):
     return max(1, len(text.split()) * 4 // 3)
 
 
+# 成本计算：根据模型定价表和 token 数计算美元成本
 def calculate_cost(model, input_tokens, output_tokens):
     pricing = MODEL_PRICING.get(model, MODEL_PRICING[ModelName.GPT_4O])
     input_cost = input_tokens / 1_000_000 * pricing["input"]
@@ -630,6 +676,7 @@ def calculate_cost(model, input_tokens, output_tokens):
     return round(input_cost + output_cost, 8)
 
 
+# 模拟响应（演示用，生产环境替换为真实 API 调用）
 SIMULATED_RESPONSES = {
     "general": "Based on the information available, here is a clear and concise answer to your question. "
                "The key points are: first, the fundamental concept involves understanding the relationship "
@@ -652,15 +699,19 @@ SIMULATED_RESPONSES = {
 }
 
 
+# 带指数退避重试的 LLM 调用（模拟故障场景）
 async def call_llm_with_retry(prompt, model, max_retries=3):
     for attempt in range(max_retries + 1):
         try:
+            # 模拟 API 故障：首次 15% 失败率，重试后降至 5%
             failure_chance = 0.15 if attempt == 0 else 0.05
             if random.random() < failure_chance:
                 raise ConnectionError(f"API error from {model.value}: 500 Internal Server Error")
 
+            # 模拟网络延迟
             await asyncio.sleep(random.uniform(0.1, 0.3))
 
+            # 根据提示内容选择模拟响应类型
             if "code" in prompt.lower() or "review" in prompt.lower():
                 response_text = SIMULATED_RESPONSES["code_review"]
             elif "context" in prompt.lower():
@@ -677,6 +728,7 @@ async def call_llm_with_retry(prompt, model, max_retries=3):
 
         except (ConnectionError, TimeoutError) as e:
             if attempt < max_retries:
+                # 指数退避 + 随机抖动，防止惊群效应
                 backoff = min(2 ** attempt + random.uniform(0, 1), 10)
                 await asyncio.sleep(backoff)
             else:
@@ -685,6 +737,7 @@ async def call_llm_with_retry(prompt, model, max_retries=3):
     raise ConnectionError(f"All {max_retries} retries exhausted for {model.value}")
 
 
+# 备用模型链：按顺序尝试，直到某个模型成功
 async def call_with_fallback(prompt, preferred_model=None):
     chain = list(FALLBACK_CHAIN)
     if preferred_model and preferred_model in chain:
@@ -697,8 +750,9 @@ async def call_with_fallback(prompt, preferred_model=None):
             return await call_llm_with_retry(prompt, model)
         except ConnectionError as e:
             last_error = e
-            continue
+            continue  # 当前模型失败，尝试下一个
 
+    # 所有模型都失败，返回降级响应
     return {
         "text": "I apologize, but I am temporarily unable to process your request. Please try again in a moment.",
         "model": "fallback",
@@ -708,11 +762,13 @@ async def call_with_fallback(prompt, preferred_model=None):
     }
 
 
+# 流式响应生成器：逐词输出，模拟逐 token 传输
 async def stream_response(text):
     words = text.split()
     for i, word in enumerate(words):
         token = word if i == 0 else " " + word
         yield token
+        # 模拟 LLM 生成 token 的延迟
         await asyncio.sleep(random.uniform(0.02, 0.08))
 ```
 

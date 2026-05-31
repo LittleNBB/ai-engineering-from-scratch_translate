@@ -208,6 +208,8 @@ OpenAI 的 Batch API 以 50% 的折扣异步处理请求。你提交最多 50,00
 构建一个了解主要模型当前定价的 token 成本计算器。
 
 ```python
+# 成本计算器：基于模型定价和 token 数量计算 API 调用成本
+# 支持缓存 token 的折扣价格（如 Anthropic 的 cached_input 约为原价的 10%）
 import hashlib
 import time
 import json
@@ -215,6 +217,8 @@ import math
 from dataclasses import dataclass, field
 
 
+# 模型定价表：每百万 token 的价格（美元）
+# cached_input: 提示缓存命中的输入 token 折扣价（Anthropic/OpenAI 都支持）
 MODEL_PRICING = {
     "gpt-4o": {"input": 2.50, "output": 10.00, "cached_input": 1.25},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60, "cached_input": 0.075},
@@ -233,13 +237,15 @@ MODEL_PRICING = {
 
 
 def calculate_cost(model, input_tokens, output_tokens, cached_input_tokens=0):
+    """计算单次 API 调用成本：未缓存输入 + 缓存输入 + 输出"""
     if model not in MODEL_PRICING:
         return {"error": f"Unknown model: {model}"}
     pricing = MODEL_PRICING[model]
+    # 区分缓存和未缓存的输入 token（缓存价格通常是原价的 10-50%）
     non_cached = input_tokens - cached_input_tokens
-    input_cost = (non_cached / 1_000_000) * pricing["input"]
-    cached_cost = (cached_input_tokens / 1_000_000) * pricing["cached_input"]
-    output_cost = (output_tokens / 1_000_000) * pricing["output"]
+    input_cost = (non_cached / 1_000_000) * pricing["input"]        # 未缓存输入成本
+    cached_cost = (cached_input_tokens / 1_000_000) * pricing["cached_input"]  # 缓存输入成本
+    output_cost = (output_tokens / 1_000_000) * pricing["output"]   # 输出成本（最贵的部分）
     total = input_cost + cached_cost + output_cost
     return {
         "model": model,
@@ -258,37 +264,45 @@ def calculate_cost(model, input_tokens, output_tokens, cached_input_tokens=0):
 对完整提示进行哈希，为相同请求返回缓存的响应。
 
 ```python
+# 精确缓存：对完整提示进行 SHA-256 哈希，相同请求直接返回缓存响应
+# 适用场景：temperature=0 的确定性查询、重复的系统提示、相同的 RAG 上下文
+# 限制：无法匹配语义相同但措辞不同的查询（需要语义缓存）
 class ExactCache:
     def __init__(self, max_size=1000, ttl_seconds=3600):
-        self.cache = {}
-        self.max_size = max_size
-        self.ttl = ttl_seconds
-        self.hits = 0
-        self.misses = 0
+        self.cache = {}                  # 哈希 → 缓存条目
+        self.max_size = max_size         # 最大缓存条目数（LRU 淘汰）
+        self.ttl = ttl_seconds           # 缓存过期时间（秒）
+        self.hits = 0                    # 缓存命中次数
+        self.misses = 0                  # 缓存未命中次数
 
     def _hash(self, model, messages, temperature):
+        """生成缓存键：将请求参数序列化后取 SHA-256"""
         key_data = json.dumps({"model": model, "messages": messages, "temperature": temperature}, sort_keys=True)
         return hashlib.sha256(key_data.encode()).hexdigest()
 
     def get(self, model, messages, temperature=0.0):
+        """查找缓存：只缓存 temperature=0 的确定性请求"""
         if temperature > 0:
+            # temperature>0 时输出是随机的，缓存没有意义
             self.misses += 1
             return None
         key = self._hash(model, messages, temperature)
         if key in self.cache:
             entry = self.cache[key]
-            if time.time() - entry["timestamp"] < self.ttl:
+            if time.time() - entry["timestamp"] < self.ttl:  # 检查是否过期
                 self.hits += 1
                 entry["access_count"] += 1
                 return entry["response"]
-            del self.cache[key]
+            del self.cache[key]  # 过期则删除
         self.misses += 1
         return None
 
     def put(self, model, messages, temperature, response):
+        """存入缓存：超过容量时淘汰最旧的条目"""
         if temperature > 0:
-            return
+            return  # 不缓存随机输出
         if len(self.cache) >= self.max_size:
+            # LRU 淘汰：删除时间戳最旧的条目
             oldest_key = min(self.cache, key=lambda k: self.cache[k]["timestamp"])
             del self.cache[oldest_key]
         key = self._hash(model, messages, temperature)
@@ -299,6 +313,7 @@ class ExactCache:
         }
 
     def stats(self):
+        """返回缓存统计信息"""
         total = self.hits + self.misses
         return {
             "hits": self.hits,
@@ -313,17 +328,20 @@ class ExactCache:
 嵌入查询，当相似度超过阈值时返回缓存的响应。
 
 ```python
+# 简易词袋嵌入：将文本转换为归一化的词频向量（用于语义相似度计算）
+# 生产环境中应使用 OpenAI/Cohere 的真实 embedding 模型
 def simple_embed(text):
     words = text.lower().split()
     vocab = {}
     for w in words:
-        vocab[w] = vocab.get(w, 0) + 1
-    norm = math.sqrt(sum(v * v for v in vocab.values()))
+        vocab[w] = vocab.get(w, 0) + 1   # 统计词频
+    norm = math.sqrt(sum(v * v for v in vocab.values()))  # L2 归一化
     if norm == 0:
         return {}
     return {k: v / norm for k, v in vocab.items()}
 
 
+# 余弦相似度：已归一化的向量，点积即余弦相似度
 def cosine_similarity(a, b):
     if not a or not b:
         return 0.0
@@ -332,27 +350,32 @@ def cosine_similarity(a, b):
     return dot
 
 
+# 语义缓存：当查询与缓存中的查询语义相似时返回缓存响应
+# 核心思想：用户的措辞可能不同，但意图相同（如"退款政策"vs"怎么退款"）
+# threshold=0.85 是一个较高的阈值，确保只有真正相似的查询才命中缓存
 class SemanticCache:
     def __init__(self, similarity_threshold=0.85, max_size=500, ttl_seconds=3600):
-        self.entries = []
-        self.threshold = similarity_threshold
-        self.max_size = max_size
-        self.ttl = ttl_seconds
+        self.entries = []                        # 缓存条目列表
+        self.threshold = similarity_threshold    # 相似度阈值（0-1）
+        self.max_size = max_size                 # 最大条目数
+        self.ttl = ttl_seconds                   # 过期时间
         self.hits = 0
         self.misses = 0
 
     def get(self, query):
+        """查找语义相似的缓存条目：遍历所有条目，找最相似的"""
         query_embedding = simple_embed(query)
         now = time.time()
         best_match = None
         best_sim = 0.0
         for entry in self.entries:
             if now - entry["timestamp"] > self.ttl:
-                continue
+                continue  # 跳过过期条目
             sim = cosine_similarity(query_embedding, entry["embedding"])
             if sim > best_sim:
                 best_sim = sim
                 best_match = entry
+        # 只有相似度超过阈值才返回缓存
         if best_match and best_sim >= self.threshold:
             self.hits += 1
             best_match["access_count"] += 1
@@ -361,9 +384,10 @@ class SemanticCache:
         return None
 
     def put(self, query, response):
+        """存入缓存：同时存储查询文本、embedding 和响应"""
         if len(self.entries) >= self.max_size:
             self.entries.sort(key=lambda e: e["timestamp"])
-            self.entries.pop(0)
+            self.entries.pop(0)  # 淘汰最旧的
         self.entries.append({
             "query": query,
             "embedding": simple_embed(query),
@@ -373,6 +397,7 @@ class SemanticCache:
         })
 
     def stats(self):
+        """返回缓存命中率等统计信息"""
         total = self.hits + self.misses
         return {
             "hits": self.hits,
@@ -387,9 +412,12 @@ class SemanticCache:
 带每用户配额的令牌桶速率限制器。
 
 ```python
+# 令牌桶速率限制器：按用户配额限制 API 调用频率和 token 消耗
+# 双重限制：每分钟请求数（RPM）+ token 桶容量（防止单次大量消耗）
+# 分层定价：免费/专业/企业用户有不同的配额和恢复速率
 class TokenBucketRateLimiter:
     def __init__(self):
-        self.buckets = {}
+        self.buckets = {}   # 用户 ID → 令牌桶状态
         self.tiers = {
             "free": {"capacity": 50_000, "refill_rate": 500, "max_requests_per_min": 10},
             "pro": {"capacity": 500_000, "refill_rate": 5_000, "max_requests_per_min": 60},
@@ -397,14 +425,15 @@ class TokenBucketRateLimiter:
         }
 
     def _get_bucket(self, user_id, tier="free"):
+        """获取或创建用户的令牌桶"""
         if user_id not in self.buckets:
             tier_config = self.tiers.get(tier, self.tiers["free"])
             self.buckets[user_id] = {
-                "tokens": tier_config["capacity"],
-                "capacity": tier_config["capacity"],
-                "refill_rate": tier_config["refill_rate"],
+                "tokens": tier_config["capacity"],        # 当前剩余 token 数
+                "capacity": tier_config["capacity"],      # 桶容量上限
+                "refill_rate": tier_config["refill_rate"], # 每秒恢复的 token 数
                 "last_refill": time.time(),
-                "request_timestamps": [],
+                "request_timestamps": [],                 # 最近 60 秒的请求时间戳（用于 RPM 限制）
                 "max_rpm": tier_config["max_requests_per_min"],
                 "tier": tier,
                 "total_tokens_used": 0,
@@ -412,6 +441,7 @@ class TokenBucketRateLimiter:
         return self.buckets[user_id]
 
     def _refill(self, bucket):
+        """根据经过的时间补充令牌"""
         now = time.time()
         elapsed = now - bucket["last_refill"]
         refill = int(elapsed * bucket["refill_rate"])
@@ -420,12 +450,16 @@ class TokenBucketRateLimiter:
             bucket["last_refill"] = now
 
     def check(self, user_id, tokens_needed, tier="free"):
+        """检查是否允许请求：先检查 RPM，再检查 token 余额"""
         bucket = self._get_bucket(user_id, tier)
         self._refill(bucket)
         now = time.time()
+        # 清理超过 60 秒的请求记录
         bucket["request_timestamps"] = [t for t in bucket["request_timestamps"] if now - t < 60]
+        # 检查每分钟请求数限制
         if len(bucket["request_timestamps"]) >= bucket["max_rpm"]:
             return {"allowed": False, "reason": "rate_limit", "retry_after_seconds": 60 - (now - bucket["request_timestamps"][0])}
+        # 检查 token 余额
         if bucket["tokens"] < tokens_needed:
             deficit = tokens_needed - bucket["tokens"]
             wait = deficit / bucket["refill_rate"]
@@ -433,12 +467,14 @@ class TokenBucketRateLimiter:
         return {"allowed": True, "tokens_available": bucket["tokens"]}
 
     def consume(self, user_id, tokens_used, tier="free"):
+        """消耗 token 并记录请求时间"""
         bucket = self._get_bucket(user_id, tier)
         bucket["tokens"] -= tokens_used
         bucket["request_timestamps"].append(time.time())
         bucket["total_tokens_used"] += tokens_used
 
     def get_usage(self, user_id):
+        """查询用户的 token 使用情况"""
         if user_id not in self.buckets:
             return {"error": "User not found"}
         b = self.buckets[user_id]
@@ -457,13 +493,16 @@ class TokenBucketRateLimiter:
 记录每次调用并计算运行总计。
 
 ```python
+# 成本追踪器：记录每次 API 调用的 token 用量和成本，提供预算告警
+# 核心功能：实时追踪 → 按模型分组统计 → 缓存节省计算 → 预算阈值告警
 class CostTracker:
     def __init__(self, monthly_budget=1000.0):
-        self.logs = []
-        self.monthly_budget = monthly_budget
-        self.alerts = []
+        self.logs = []                        # 所有调用记录
+        self.monthly_budget = monthly_budget  # 月度预算上限（美元）
+        self.alerts = []                      # 预算告警列表
 
     def log_call(self, model, input_tokens, output_tokens, cached_input_tokens=0, latency_ms=0, user_id="anonymous", cache_status="miss"):
+        """记录一次 API 调用：计算成本并检查预算"""
         cost = calculate_cost(model, input_tokens, output_tokens, cached_input_tokens)
         entry = {
             "timestamp": time.time(),
@@ -481,6 +520,7 @@ class CostTracker:
         return entry
 
     def _check_budget(self):
+        """预算告警：70% 警告，85% 限速，95% 停止"""
         total = self.total_cost()
         pct = total / self.monthly_budget if self.monthly_budget > 0 else 0
         if pct >= 0.95 and not any(a["level"] == "stop" for a in self.alerts):
@@ -491,9 +531,11 @@ class CostTracker:
             self.alerts.append({"level": "warning", "message": f"Budget 70% consumed: ${total:.2f}/${self.monthly_budget:.2f}", "timestamp": time.time()})
 
     def total_cost(self):
+        """计算累计总成本"""
         return round(sum(e["cost"] for e in self.logs), 6)
 
     def cost_by_model(self):
+        """按模型分组统计成本和 token 用量"""
         by_model = {}
         for e in self.logs:
             m = e["model"]
@@ -506,6 +548,7 @@ class CostTracker:
         return by_model
 
     def cache_savings(self):
+        """计算缓存节省的成本：假设未命中缓存时需要支付全价"""
         cache_hits = [e for e in self.logs if e["cache_status"] == "hit"]
         if not cache_hits:
             return {"saved": 0, "cache_hits": 0}
@@ -516,6 +559,7 @@ class CostTracker:
         return {"saved": round(saved, 4), "cache_hits": len(cache_hits)}
 
     def summary(self):
+        """生成完整的成本报告摘要"""
         if not self.logs:
             return {"total_calls": 0, "total_cost": 0}
         total_latency = sum(e["latency_ms"] for e in self.logs)
@@ -539,11 +583,15 @@ class CostTracker:
 将查询路由到能处理它们的最便宜模型。
 
 ```python
+# 模型路由器：根据查询复杂度选择最便宜的能胜任的模型
+# 核心思想：简单问题用便宜模型（如 gpt-4o-mini），复杂问题用昂贵模型（如 claude-opus）
+# 效果：60-80% 的查询可以用便宜模型处理，大幅降低成本
 SIMPLE_KEYWORDS = ["what time", "hours", "address", "phone", "price", "return policy", "hello", "hi", "thanks", "yes", "no"]
 COMPLEX_KEYWORDS = ["analyze", "compare", "explain why", "write code", "debug", "architect", "design", "trade-off", "evaluate"]
 
 
 def classify_complexity(query):
+    """查询复杂度分类：simple（简单）/ medium（中等）/ complex（复杂）"""
     q = query.lower()
     if len(q.split()) <= 5 or any(kw in q for kw in SIMPLE_KEYWORDS):
         return "simple"
@@ -553,11 +601,13 @@ def classify_complexity(query):
 
 
 def route_model(query, tier="pro"):
+    """根据复杂度和用户层级路由到最便宜的能胜任的模型"""
     complexity = classify_complexity(query)
+    # 路由表：越简单的查询用越便宜的模型
     routing_table = {
-        "simple": {"free": "gpt-4.1-nano", "pro": "gpt-4o-mini", "enterprise": "gpt-4o-mini"},
-        "medium": {"free": "gpt-4o-mini", "pro": "claude-sonnet-4", "enterprise": "claude-sonnet-4"},
-        "complex": {"free": "gpt-4o-mini", "pro": "gpt-4o", "enterprise": "claude-opus-4"},
+        "simple": {"free": "gpt-4.1-nano", "pro": "gpt-4o-mini", "enterprise": "gpt-4o-mini"},       # 最便宜
+        "medium": {"free": "gpt-4o-mini", "pro": "claude-sonnet-4", "enterprise": "claude-sonnet-4"}, # 中等
+        "complex": {"free": "gpt-4o-mini", "pro": "gpt-4o", "enterprise": "claude-opus-4"},          # 最贵
     }
     model = routing_table[complexity].get(tier, "gpt-4o-mini")
     return {"query": query, "complexity": complexity, "model": model, "tier": tier}
@@ -566,10 +616,12 @@ def route_model(query, tier="pro"):
 ### 步骤 7：运行演示
 
 ```python
+# 模拟 LLM 调用：根据查询长度估算 token 数和延迟
+# 生产环境中替换为真实的 API 调用
 def simulate_llm_call(model, query):
-    input_tokens = len(query.split()) * 4 + 500
-    output_tokens = 150 + (len(query.split()) * 2)
-    latency = 200 + (output_tokens * 2)
+    input_tokens = len(query.split()) * 4 + 500   # 估算输入 token（含系统提示）
+    output_tokens = 150 + (len(query.split()) * 2) # 估算输出 token
+    latency = 200 + (output_tokens * 2)            # 估算延迟（ms）
     return {
         "model": model,
         "response": f"[Simulated {model} response to: {query[:50]}...]",
@@ -579,25 +631,30 @@ def simulate_llm_call(model, query):
     }
 
 
+# 完整演示：展示成本计算、缓存、速率限制和模型路由
 def run_demo():
     print("=" * 60)
     print("  Caching, Rate Limiting & Cost Optimization Demo")
     print("=" * 60)
 
+    # 第1部分：模型定价对比
     print("\n--- Model Pricing ---")
     for model, pricing in list(MODEL_PRICING.items())[:6]:
         cost_1k = calculate_cost(model, 1000, 500)
         print(f"  {model}: ${cost_1k['total_cost']:.6f} per 1K in + 500 out")
 
+    # 第2部分：10 万次请求的成本对比
     print("\n--- Cost Comparison: 100K Requests ---")
     for model in ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4", "claude-haiku-3.5"]:
         cost = calculate_cost(model, 1000 * 100_000, 500 * 100_000)
         print(f"  {model}: ${cost['total_cost']:.2f}")
 
+    # 第3部分：Anthropic 提示缓存的节省效果
     print("\n--- Anthropic Cache Savings ---")
-    no_cache = calculate_cost("claude-sonnet-4", 2000, 500, 0)
-    with_cache = calculate_cost("claude-sonnet-4", 2000, 500, 1500)
+    no_cache = calculate_cost("claude-sonnet-4", 2000, 500, 0)       # 无缓存
+    with_cache = calculate_cost("claude-sonnet-4", 2000, 500, 1500)  # 1500 token 被缓存
     saving = no_cache["total_cost"] - with_cache["total_cost"]
+```
     print(f"  Without cache: ${no_cache['total_cost']:.6f}")
     print(f"  With 1500 cached tokens: ${with_cache['total_cost']:.6f}")
     print(f"  Savings per call: ${saving:.6f} ({saving/no_cache['total_cost']*100:.1f}%)")

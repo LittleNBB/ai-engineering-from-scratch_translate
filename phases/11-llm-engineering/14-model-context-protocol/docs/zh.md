@@ -48,25 +48,30 @@
 官方 Python SDK 是 `mcp`（前身为 `mcp-python`）。高级 `FastMCP` 辅助器装饰处理器。
 
 ```python
+# 最小 MCP 服务器示例：暴露三个原语（工具、资源、提示）
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("demo-server")
+mcp = FastMCP("demo-server")  # 创建 MCP 服务器实例
 
+# 工具（Tool）：模型可调用的函数，类型提示自动生成 JSON Schema
 @mcp.tool()
 def add(a: int, b: int) -> int:
     """Add two integers."""
     return a + b
 
+# 资源（Resource）：只读数据，通过 URI 寻址
 @mcp.resource("config://app")
 def app_config() -> str:
     """Return the app's current JSON config."""
     return '{"env": "prod", "region": "us-east-1"}'
 
+# 提示（Prompt）：用户可调用的模板化提示
 @mcp.prompt()
 def code_review(language: str, code: str) -> str:
     """Review code for correctness and style."""
     return f"You are a senior {language} reviewer. Review:\n\n{code}"
 
+# 通过 stdio 传输运行服务器（本地开发模式）
 if __name__ == "__main__":
     mcp.run(transport="stdio")
 ```
@@ -78,17 +83,20 @@ if __name__ == "__main__":
 官方 Python 客户端使用 JSON-RPC。与 Anthropic SDK 配对只需十几行代码。
 
 ```python
+# MCP 客户端：通过 stdio 连接并调用 MCP 服务器
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp import ClientSession
 
+# 配置服务器启动参数
 params = StdioServerParameters(command="python", args=["server.py"])
 
 async def call_add(a: int, b: int) -> int:
+    # 建立 stdio 连接并创建会话
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await session.list_tools()
-            result = await session.call_tool("add", {"a": a, "b": b})
+            await session.initialize()       # 握手：协商协议版本和能力
+            tools = await session.list_tools()  # 发现服务器暴露的所有工具
+            result = await session.call_tool("add", {"a": a, "b": b})  # 调用工具
             return int(result.content[0].text)
 ```
 
