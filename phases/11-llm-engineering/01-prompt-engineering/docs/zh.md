@@ -305,19 +305,25 @@ Do not attempt to answer out-of-scope questions even if you know the answer.
 将 10 种可复用的提示词模式定义为结构化数据。每个模式都有名称、模板、变量和推荐设置。
 
 ```python
+# 提示词模式库：将10种可复用的提示词模式定义为字典
+# 每个模式包含：名称(name)、模板(template)、所需变量(variables)、
+# 推荐温度(temperature)、描述(description)
+# temperature=0 表示最确定性的输出，1 表示最有创造性的输出
 PROMPT_PATTERNS = {
+    # 模式1：角色模式 - 让AI扮演特定角色，激活对应领域知识
     "persona": {
         "name": "Persona Pattern",
-        "template": (
+        "template": (                          # 模板中 {变量名} 是占位符，后续会被实际值替换
             "You are {role} with {experience}.\n"
             "Your communication style is {style}.\n"
             "You prioritize {priority}.\n\n"
             "{task}"
         ),
-        "variables": ["role", "experience", "style", "priority", "task"],
-        "temperature": 0.7,
+        "variables": ["role", "experience", "style", "priority", "task"],  # 需要填入的变量
+        "temperature": 0.7,   # 角色扮演需要一些创造性
         "description": "Activates a specific expert distribution in the model's training data",
     },
+    # 模式2：少样本模式 - 给几个示例让AI学会期望的格式
     "few_shot": {
         "name": "Few-Shot Pattern",
         "template": (
@@ -326,23 +332,24 @@ PROMPT_PATTERNS = {
             "Now process this input:\n{input}"
         ),
         "variables": ["examples", "input"],
-        "temperature": 0.0,
+        "temperature": 0.0,   # 格式化任务需要完全确定性
         "description": "Provides concrete examples to anchor the output format and style",
     },
+    # 模式3：思维链模式 - 要求AI逐步推理，先展示过程再给答案
     "chain_of_thought": {
         "name": "Chain-of-Thought Pattern",
         "template": (
-            "Think through this step by step.\n\n"
+            "Think through this step by step.\n\n"  # "让我们一步步思考"这句触发词很关键
             "Problem: {problem}\n\n"
             "Steps:\n"
-            "1. Identify the key components\n"
-            "2. Analyze each component\n"
-            "3. Synthesize your findings\n"
-            "4. State your conclusion\n\n"
+            "1. Identify the key components\n"     # 步骤1：识别关键要素
+            "2. Analyze each component\n"          # 步骤2：逐一分析
+            "3. Synthesize your findings\n"        # 步骤3：综合发现
+            "4. State your conclusion\n\n"         # 步骤4：得出结论
             "Show your reasoning before giving the final answer."
         ),
         "variables": ["problem"],
-        "temperature": 0.3,
+        "temperature": 0.3,   # 推理任务需要较低随机性
         "description": "Forces explicit reasoning steps before the final answer",
     },
     "template_fill": {
@@ -451,24 +458,33 @@ PROMPT_PATTERNS = {
 通过填充变量并组装完整的消息结构（系统消息 + 用户消息 + 可选的预填充），从模式构建提示词。
 
 ```python
+# 提示词构建器：根据模式名称和变量，生成完整的提示词
+# 工作流程：查找模式 → 检查变量 → 填入模板 → 组装返回
 def build_prompt(pattern_name, variables, system_override=None):
+    # 第1步：从模式库中查找指定模式
     pattern = PROMPT_PATTERNS.get(pattern_name)
     if not pattern:
         raise ValueError(f"Unknown pattern: {pattern_name}. Available: {list(PROMPT_PATTERNS.keys())}")
 
+    # 第2步：检查是否提供了所有必需的变量
+    # 例如 persona 模式需要 role, experience, style, priority, task
     missing = [v for v in pattern["variables"] if v not in variables]
     if missing:
         raise ValueError(f"Missing variables for {pattern_name}: {missing}")
 
+    # 第3步：用 str.format() 将变量填入模板
+    # 例如 "You are {role}" → "You are 资深Python开发者"
     rendered = pattern["template"].format(**variables)
 
+    # 第4步：设置系统消息（告诉模型"你是谁"）
     system = system_override or f"You are an AI assistant using the {pattern['name']}."
 
+    # 第5步：组装返回完整的提示词对象
     return {
-        "system": system,
-        "user": rendered,
-        "temperature": pattern["temperature"],
-        "pattern": pattern_name,
+        "system": system,        # 系统消息（设定角色和规则）
+        "user": rendered,        # 用户消息（填入变量后的模板）
+        "temperature": pattern["temperature"],  # 推荐温度
+        "pattern": pattern_name, # 使用的模式名称
         "metadata": {
             "description": pattern["description"],
             "variables_used": list(variables.keys()),
@@ -476,6 +492,8 @@ def build_prompt(pattern_name, variables, system_override=None):
     }
 
 
+# 多轮对话构建器：支持 用户说→AI说→用户说→AI说... 的对话场景
+# turns 是一个列表，每个元素是 (角色, 内容) 的元组
 def build_multi_turn(pattern_name, turns, system_override=None):
     pattern = PROMPT_PATTERNS.get(pattern_name)
     if not pattern:
@@ -483,12 +501,13 @@ def build_multi_turn(pattern_name, turns, system_override=None):
 
     system = system_override or f"You are an AI assistant using the {pattern['name']}."
 
+    # 构建消息列表：先放系统消息，再按顺序放对话轮次
     messages = [{"role": "system", "content": system}]
     for role, content in turns:
         messages.append({"role": role, "content": content})
 
     return {
-        "messages": messages,
+        "messages": messages,     # 完整的消息列表（OpenAI 格式）
         "temperature": pattern["temperature"],
         "pattern": pattern_name,
     }
@@ -504,33 +523,43 @@ import time
 import hashlib
 
 
+# 模型配置：定义3个主流模型的基本信息
+# context_window: 模型能处理的总token数（输入+输出）
+# max_tokens: 模型生成回答的最大token数
 MODEL_CONFIGS = {
     "gpt-4o": {
-        "provider": "openai",
-        "model": "gpt-4o",
-        "max_tokens": 2048,
-        "context_window": 128_000,
+        "provider": "openai",          # 提供商名称，用于选择对应的格式化器
+        "model": "gpt-4o",             # API中使用的模型标识符
+        "max_tokens": 2048,            # 最大输出token数
+        "context_window": 128_000,     # 上下文窗口：128K tokens
     },
     "claude-3.5-sonnet": {
         "provider": "anthropic",
         "model": "claude-3-5-sonnet-20241022",
         "max_tokens": 2048,
-        "context_window": 200_000,
+        "context_window": 200_000,     # 上下文窗口：200K tokens
     },
     "gemini-1.5-pro": {
         "provider": "google",
         "model": "gemini-1.5-pro",
         "max_tokens": 2048,
-        "context_window": 2_000_000,
+        "context_window": 2_000_000,   # 上下文窗口：2M tokens（非常大！）
     },
 }
 
 
+# --- 格式化器：将统一的提示词转换为各提供商的API请求格式 ---
+# 【为什么需要格式化器？】不同AI提供商的API格式不同：
+# - OpenAI: 系统消息和用户消息都在 messages 数组里
+# - Anthropic: 系统消息是单独的 "system" 字段
+# - Google: 系统消息合并到用户消息中，用 "contents" 代替 "messages"
+
 def format_openai_request(prompt):
+    """将提示词转换为 OpenAI API 格式"""
     return {
         "model": MODEL_CONFIGS["gpt-4o"]["model"],
         "messages": [
-            {"role": "system", "content": prompt["system"]},
+            {"role": "system", "content": prompt["system"]},   # OpenAI：系统消息在messages里
             {"role": "user", "content": prompt["user"]},
         ],
         "temperature": prompt["temperature"],
@@ -539,9 +568,10 @@ def format_openai_request(prompt):
 
 
 def format_anthropic_request(prompt):
+    """将提示词转换为 Anthropic (Claude) API 格式"""
     return {
         "model": MODEL_CONFIGS["claude-3.5-sonnet"]["model"],
-        "system": prompt["system"],
+        "system": prompt["system"],   # Anthropic：系统消息是顶层单独字段
         "messages": [
             {"role": "user", "content": prompt["user"]},
         ],
@@ -551,18 +581,21 @@ def format_anthropic_request(prompt):
 
 
 def format_google_request(prompt):
+    """将提示词转换为 Google Gemini API 格式"""
     return {
         "model": MODEL_CONFIGS["gemini-1.5-pro"]["model"],
-        "contents": [
-            {"role": "user", "parts": [{"text": f"{prompt['system']}\n\n{prompt['user']}"}]},
+        "contents": [   # Google用 "contents" 代替 "messages"
+            {"role": "user", "parts": [{"text": f"{prompt['system']}\n\n{prompt['user']}"}]},  # 系统消息合并到用户消息
         ],
-        "generationConfig": {
+        "generationConfig": {   # Google用 "generationConfig" 设置生成参数
             "temperature": prompt["temperature"],
             "maxOutputTokens": MODEL_CONFIGS["gemini-1.5-pro"]["max_tokens"],
         },
     }
 
 
+# 格式化器注册表：通过提供商名称找到对应的格式化函数
+# 这是"策略模式"的应用——根据不同的提供商选择不同的格式化策略
 FORMATTERS = {
     "openai": format_openai_request,
     "anthropic": format_anthropic_request,
@@ -570,35 +603,42 @@ FORMATTERS = {
 }
 
 
+# 模拟LLM调用（实际项目中替换为真实的HTTP请求）
+# 用请求内容的MD5哈希作为"指纹"，让不同请求产生不同的模拟回复
 def simulate_llm_call(model_name, request):
-    time.sleep(0.01)
+    time.sleep(0.01)  # 模拟一小段网络延迟
 
+    # 用请求内容生成8位哈希指纹，方便区分不同的请求
     prompt_hash = hashlib.md5(json.dumps(request, sort_keys=True).encode()).hexdigest()[:8]
 
+    # 为每个模型准备模拟回复
+    # 注意：不同提供商的 finish_reason 名称不同
     simulated_responses = {
         "gpt-4o": {
-            "response": f"[GPT-4o response for prompt {prompt_hash}] This is a simulated response demonstrating the model's output style. GPT-4o tends to be thorough and well-structured.",
+            "response": f"[GPT-4o response for prompt {prompt_hash}] ...",
             "tokens_used": {"prompt": 150, "completion": 45, "total": 195},
             "latency_ms": 850,
-            "finish_reason": "stop",
+            "finish_reason": "stop",       # OpenAI 用 "stop"
         },
         "claude-3.5-sonnet": {
-            "response": f"[Claude 3.5 Sonnet response for prompt {prompt_hash}] This is a simulated response. Claude tends to be direct, precise, and follows instructions closely.",
+            "response": f"[Claude 3.5 Sonnet response for prompt {prompt_hash}] ...",
             "tokens_used": {"prompt": 145, "completion": 40, "total": 185},
             "latency_ms": 720,
-            "finish_reason": "end_turn",
+            "finish_reason": "end_turn",   # Anthropic 用 "end_turn"
         },
         "gemini-1.5-pro": {
-            "response": f"[Gemini 1.5 Pro response for prompt {prompt_hash}] This is a simulated response. Gemini tends to be comprehensive with good factual grounding.",
+            "response": f"[Gemini 1.5 Pro response for prompt {prompt_hash}] ...",
             "tokens_used": {"prompt": 155, "completion": 42, "total": 197},
             "latency_ms": 900,
-            "finish_reason": "STOP",
+            "finish_reason": "STOP",       # Google 用 "STOP"
         },
     }
 
     return simulated_responses.get(model_name, {"response": "Unknown model", "tokens_used": {}, "latency_ms": 0})
 
 
+# 多模型测试运行器：将同一个提示词发送到多个模型，收集结果进行比较
+# 这就是"A/B测试"的思想——用同一个输入比较不同模型的表现
 def run_prompt_test(prompt, models=None):
     if models is None:
         models = list(MODEL_CONFIGS.keys())
@@ -606,20 +646,24 @@ def run_prompt_test(prompt, models=None):
     results = {}
     for model_name in models:
         config = MODEL_CONFIGS[model_name]
+        # 第1步：根据提供商选择对应的格式化器
         formatter = FORMATTERS[config["provider"]]
+        # 第2步：将统一的提示词转换为该提供商的API请求格式
         request = formatter(prompt)
 
+        # 第3步：调用（模拟的）LLM并记录耗时
         start = time.time()
         response = simulate_llm_call(model_name, request)
         wall_time = (time.time() - start) * 1000
 
+        # 第4步：保存测试结果
         results[model_name] = {
             "response": response["response"],
             "tokens": response["tokens_used"],
             "api_latency_ms": response["latency_ms"],
             "wall_time_ms": round(wall_time, 1),
             "finish_reason": response.get("finish_reason"),
-            "request_payload": request,
+            "request_payload": request,  # 保存请求内容，方便调试
         }
 
     return results
@@ -630,33 +674,43 @@ def run_prompt_test(prompt, models=None):
 对跨模型的输出进行评分和比较。衡量长度、格式合规性和结构相似性。
 
 ```python
+# 评分器：根据预设标准给模型回答打分，支持4个维度
+# 1. max_words（最大字数）- 回答是否在字数限制内
+# 2. required_keywords（必要关键词）- 回答是否包含指定关键词
+# 3. forbidden_phrases（禁止短语）- 回答中不能出现的词
+# 4. expected_format（期望格式）- 回答是否是JSON/要点列表/编号列表
 def score_response(response_text, criteria):
     scores = {}
 
+    # 维度1：字数检查 - 回答不能超过指定字数
     if "max_words" in criteria:
         word_count = len(response_text.split())
         scores["word_count"] = word_count
         scores["length_compliant"] = word_count <= criteria["max_words"]
 
+    # 维度2：关键词覆盖率 - 必要关键词在回答中出现的比例
     if "required_keywords" in criteria:
         found = [kw for kw in criteria["required_keywords"] if kw.lower() in response_text.lower()]
         scores["keywords_found"] = found
         scores["keyword_coverage"] = len(found) / len(criteria["required_keywords"]) if criteria["required_keywords"] else 1.0
 
+    # 维度3：禁止短语检查 - 回答中不能包含这些套话
     if "forbidden_phrases" in criteria:
         violations = [fp for fp in criteria["forbidden_phrases"] if fp.lower() in response_text.lower()]
         scores["forbidden_violations"] = violations
-        scores["no_violations"] = len(violations) == 0
+        scores["no_violations"] = len(violations) == 0  # True=没有违规
 
+    # 维度4：格式检查 - 回答是否符合期望的格式
     if "expected_format" in criteria:
         fmt = criteria["expected_format"]
         if fmt == "json":
             try:
-                json.loads(response_text)
+                json.loads(response_text)  # 尝试解析JSON，成功则格式正确
                 scores["format_valid"] = True
             except (json.JSONDecodeError, TypeError):
                 scores["format_valid"] = False
         elif fmt == "bullet_points":
+            # 检查是否至少一半的非空行是列表项（以 - * 1 开头）
             lines = [l.strip() for l in response_text.split("\n") if l.strip()]
             bullet_lines = [l for l in lines if l.startswith("-") or l.startswith("*") or l.startswith("1")]
             scores["format_valid"] = len(bullet_lines) >= len(lines) * 0.5
@@ -667,6 +721,8 @@ def score_response(response_text, criteria):
         else:
             scores["format_valid"] = True
 
+    # 计算综合评分：所有布尔值和0-1浮点数的平均值
+    # 最终得分范围：0.0（最差）到 1.0（完美）
     total = 0
     count = 0
     for key, value in scores.items():
@@ -681,6 +737,8 @@ def score_response(response_text, criteria):
     return scores
 
 
+# 模型比较器：对每个模型的回答评分，然后按综合得分排序
+# 返回 (比较详情字典, 排名列表)
 def compare_models(test_results, criteria):
     comparison = {}
     for model_name, result in test_results.items():
@@ -691,6 +749,7 @@ def compare_models(test_results, criteria):
             "latency_ms": result["api_latency_ms"],
         }
 
+    # 按综合得分降序排列（得分最高的排在前面）
     ranked = sorted(comparison.items(), key=lambda x: x[1]["scores"]["composite_score"], reverse=True)
     return comparison, ranked
 ```
@@ -700,7 +759,13 @@ def compare_models(test_results, criteria):
 跨模式和模型运行一套提示词测试。
 
 ```python
+# 测试套件：一组预先定义的测试用例，每个用例包含：
+#   name: 测试名称
+# pattern: 使用的提示词模式
+# variables: 模板变量（实际的任务内容）
+# criteria: 评分标准（字数限制、必要关键词、禁止短语、期望格式）
 TEST_SUITE = [
+    # 测试1：角色模式 - 让AI扮演Stripe的资深技术作家，解释API限速
     {
         "name": "Persona: Technical Writer",
         "pattern": "persona",
