@@ -1,0 +1,10 @@
+name: bash
+version: 0.0.1
+schema: v1
+mcpServers:
+  - name: bash
+    command: npx
+    args:
+      - -y
+      - "bash-mcp"
+    env: {}

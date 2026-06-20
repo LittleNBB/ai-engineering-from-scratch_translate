@@ -1,0 +1,10 @@
+{"task": "列出当前目录下的全部文件", "turn": 3, "tokens": 568, "dollar": 0.0011359999999999999, "seconds": 11.5, "events": 4, "success": true}
+{"task": "创建一个 hello.txt 文件，内容是 hello world", "turn": 2, "tokens": 430, "dollar": 0.0008599999999999999, "seconds": 4.2, "events": 3, "success": true}
+{"task": "读取 hello.txt 的内容", "turn": 2, "tokens": 342, "dollar": 0.0006839999999999999, "seconds": 3.9, "events": 3, "success": true}
+{"task": "创建一个 math.py 文件，定义一个 add 函数", "turn": 2, "tokens": 472, "dollar": 0.000944, "seconds": 6.0, "events": 3, "success": true}
+{"task": "搜索 math.py 里的函数定义", "turn": 7, "tokens": 3016, "dollar": 0.006032, "seconds": 28.3, "events": 8, "success": true}
+{"task": "查看 git status", "turn": 2, "tokens": 312, "dollar": 0.000624, "seconds": 4.6, "events": 3, "success": true}
+{"task": "在 hello.txt 末尾追加一行 goodbye", "turn": 2, "tokens": 404, "dollar": 0.0008079999999999999, "seconds": 5.7, "events": 3, "success": true}
+{"task": "创建一个 data.txt,写入 1 到 10", "turn": 3, "tokens": 730, "dollar": 0.00146, "seconds": 7.6, "events": 4, "success": true}
+{"task": "读取 math.py 的内容", "turn": 10, "tokens": 3042, "dollar": 0.006084, "seconds": 35.6, "events": 11, "success": true}
+{"task": "删除 hello.txt", "turn": 3, "tokens": 552, "dollar": 0.001104, "seconds": 13.0, "events": 4, "success": true}
